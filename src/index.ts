@@ -171,7 +171,8 @@ app.get('/api/gtfs/stops-near', (req: Request, res: Response) => {
   const seen = new Set<number>();
   const results: Array<GtfsStop & { distance: number }> = [];
 
-  for (const stops of Object.values(gtfsStops)) {
+  for (const [routeKey, stops] of Object.entries(gtfsStops)) {
+    if (routeKey.startsWith('METRL') || routeKey.startsWith('METR1') || routeKey.startsWith('CPTML')) continue;
     for (const stop of stops) {
       if (seen.has(stop.cp)) continue;
       const d = hav(stop.py, stop.px);

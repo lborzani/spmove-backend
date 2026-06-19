@@ -5,7 +5,7 @@ import { sendPush } from './push';
 const router = Router();
 
 const VOTE_THRESHOLD = 5;
-const REPORT_TTL    = 2 * 60 * 60 * 1000;  // 2h
+const REPORT_TTL    = 1 * 60 * 60 * 1000;  // 1h
 const RATE_LIMIT_MS = 30 * 60 * 1000;       // 1 report/linha/30min por device
 
 const VALID_CATEGORIES = ['atraso', 'superlotacao', 'acidente', 'outro'] as const;
@@ -23,7 +23,6 @@ interface ReportRow {
   category: string;
   station: string | null;
   description: string | null;
-  image_b64: string | null;
   net_votes: number;
   promoted: number;
   created_at: number;
@@ -38,7 +37,7 @@ router.get('/summary', (_req: Request, res: Response) => {
   const rows = db.prepare(`
     SELECT line_num, COUNT(*) as count
     FROM reports
-    WHERE promoted = 1 AND expires_at > ?
+    WHERE expires_at > ? AND net_votes >= -3
     GROUP BY line_num
   `).all(Date.now()) as Array<{ line_num: string; count: number }>;
 
@@ -53,7 +52,7 @@ router.get('/', (req: Request, res: Response) => {
   if (!line) { res.status(400).json({ error: 'line required' }); return; }
 
   const rows = db.prepare(`
-    SELECT r.id, r.line_num, r.category, r.description, r.image_b64,
+    SELECT r.id, r.line_num, r.category, r.description,
            r.net_votes, r.promoted, r.created_at, r.expires_at,
            rv.vote as my_vote
     FROM reports r
@@ -67,9 +66,9 @@ router.get('/', (req: Request, res: Response) => {
 
 // POST /api/reports — criar relato
 router.post('/', (req: Request, res: Response) => {
-  const { deviceId, lineNum, category, description, imageB64, station } = req.body as {
+  const { deviceId, lineNum, category, description, station } = req.body as {
     deviceId?: string; lineNum?: string; category?: string;
-    description?: string; imageB64?: string; station?: string;
+    description?: string; station?: string;
   };
 
   if (!deviceId || !lineNum || !category) {
@@ -87,9 +86,9 @@ router.post('/', (req: Request, res: Response) => {
   if (recent) { res.status(429).json({ error: 'rate_limited' }); return; }
 
   const result = db.prepare(`
-    INSERT INTO reports (line_num, device_id, category, station, description, image_b64, net_votes, promoted, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-  `).run(lineNum, deviceId, category, station ?? null, description ?? null, imageB64 ?? null, now, now + REPORT_TTL);
+    INSERT INTO reports (line_num, device_id, category, station, description, net_votes, promoted, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+  `).run(lineNum, deviceId, category, station ?? null, description ?? null, now, now + REPORT_TTL);
 
   console.log(`[reports] created id=${result.lastInsertRowid} line=${lineNum} cat=${category} station=${station ?? 'geral'}`);
   const created = db.prepare('SELECT * FROM reports WHERE id = ?').get(result.lastInsertRowid);
