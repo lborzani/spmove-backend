@@ -25,8 +25,8 @@ const createReportSchema = z.object({
   deviceId:    z.string().min(1).max(200),
   lineNum:     z.string().min(1).max(20),
   category:    z.enum(VALID_CATEGORIES),
-  description: z.string().max(500).optional(),
-  station:     z.string().max(100).optional(),
+  description: z.string().max(500).nullish(),
+  station:     z.string().max(100).nullish(),
 });
 
 const voteSchema = z.object({
