@@ -1,18 +1,9 @@
 import cron from 'node-cron';
-import db from './db';
+import { eq, lte } from 'drizzle-orm';
+import { db } from './db';
+import { prevStatus, lineSubscriptions, devices, reports } from './schema';
 import { fetchStatus, type StatusType, RateLimitError } from './spApi';
 import { sendPush } from './push';
-
-interface PrevStatusRow {
-  line_num:   string;
-  status:     string;
-  note:       string | null;
-  updated_at: number;
-}
-
-interface SubscriberRow {
-  token: string;
-}
 
 const STATUS_LABELS: Record<StatusType, string> = {
   normal:  'Operação Normal',
@@ -20,22 +11,6 @@ const STATUS_LABELS: Record<StatusType, string> = {
   atencao: 'Operação Parcial',
   parado:  'Linha Parada',
 };
-
-const stmtPrevAll  = db.prepare('SELECT * FROM prev_status');
-const stmtUpsert   = db.prepare(`
-  INSERT INTO prev_status (line_num, status, note, updated_at)
-  VALUES (?, ?, ?, ?)
-  ON CONFLICT(line_num) DO UPDATE SET
-    status     = excluded.status,
-    note       = excluded.note,
-    updated_at = excluded.updated_at
-`);
-const stmtTokens = db.prepare(`
-  SELECT d.token
-  FROM line_subscriptions ls
-  JOIN devices d ON d.token = ls.token
-  WHERE ls.line_num = ?
-`);
 
 async function checkStatus(): Promise<void> {
   let lines;
@@ -50,8 +25,8 @@ async function checkStatus(): Promise<void> {
     return;
   }
 
-  const prevRows  = stmtPrevAll.all() as unknown as PrevStatusRow[];
-  const prevMap   = new Map(prevRows.map(r => [r.line_num, r.status as StatusType]));
+  const prevRows = db.select().from(prevStatus).all();
+  const prevMap  = new Map(prevRows.map(r => [r.lineNum, r.status as StatusType]));
 
   for (const line of lines) {
     const prev = prevMap.get(line.num);
@@ -59,29 +34,38 @@ async function checkStatus(): Promise<void> {
     if (prev !== undefined && prev !== line.status) {
       console.log(`[checker] Linha ${line.num} ${prev} → ${line.status}`);
 
-      const subscribers = stmtTokens.all(line.num) as unknown as SubscriberRow[];
+      const subscribers = db
+        .select({ token: devices.token })
+        .from(lineSubscriptions)
+        .innerJoin(devices, eq(devices.token, lineSubscriptions.token))
+        .where(eq(lineSubscriptions.lineNum, line.num))
+        .all();
+
       if (subscribers.length > 0) {
-        const tokens = subscribers.map(s => s.token);
-        const title  = `Linha ${line.num} · ${line.name}`;
-        const body   = line.note || STATUS_LABELS[line.status];
-        sendPush(tokens, title, body).catch(err =>
-          console.error('[checker] sendPush error:', err)
-        );
+        sendPush(
+          subscribers.map(s => s.token),
+          `Linha ${line.num} · ${line.name}`,
+          line.note || STATUS_LABELS[line.status],
+        ).catch(err => console.error('[checker] sendPush error:', err));
       }
     }
 
-    stmtUpsert.run(line.num, line.status, line.note, Date.now());
+    db.insert(prevStatus)
+      .values({ lineNum: line.num, status: line.status, note: line.note || null, updatedAt: Date.now() })
+      .onConflictDoUpdate({
+        target: prevStatus.lineNum,
+        set: { status: line.status, note: line.note || null, updatedAt: Date.now() },
+      })
+      .run();
   }
 
-  db.prepare('DELETE FROM reports WHERE expires_at <= ?').run(Date.now());
+  db.delete(reports).where(lte(reports.expiresAt, Date.now())).run();
 }
 
 export function startChecker(): void {
   checkStatus().catch(err => console.error('[checker] initial check error:', err));
-
   cron.schedule('*/5 * * * *', () => {
     checkStatus().catch(err => console.error('[checker] cron error:', err));
   });
-
   console.log('[checker] Started — polling every 5 minutes (12 req/hour limit)');
 }
