@@ -1,13 +1,15 @@
 import express, { Request, Response, NextFunction } from 'express';
+import cors from 'cors';
 import { timingSafeEqual } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { eq, count } from 'drizzle-orm';
 import { db } from './db';
-import { devices, lineSubscriptions } from './schema';
+import { devices, lineSubscriptions, webPushSubscriptions, webPushLineSubscriptions } from './schema';
 import { startChecker } from './checker';
 import { reportsRouter } from './reports';
+import { getCachedRaw } from './spApi';
 
 // ── GTFS stops (loaded once at startup) ──────────────────────────────────────
 
@@ -73,6 +75,17 @@ const app     = express();
 const PORT    = process.env.PORT ?? '3000';
 const API_KEY = process.env.API_KEY ?? '';
 
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS ?? 'http://localhost:8081')
+  .split(',')
+  .map(s => s.trim());
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    cb(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: '5mb' }));
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
@@ -98,6 +111,37 @@ app.get('/api/health', (_req: Request, res: Response) => {
   const [{ count: deviceCount }] = db.select({ count: count() }).from(devices).all();
   const [{ count: subCount }]    = db.select({ count: count() }).from(lineSubscriptions).all();
   res.json({ status: 'ok', devices: deviceCount, subscriptions: subCount });
+});
+
+app.get('/api/metro/status/', (_req: Request, res: Response) => {
+  const cached = getCachedRaw();
+  if (!cached) { res.status(503).json({ error: 'status not yet available' }); return; }
+  res.json(cached.data);
+});
+
+const CCM_BASE    = 'https://ccm.artesp.sp.gov.br/metroferroviario/api';
+const ccmHeaders  = () => ({ Accept: 'application/json', Authorization: `Api-Key ${process.env.CCM_API_KEY}` });
+
+app.get('/api/metro/ocorrencias/', async (req: Request, res: Response) => {
+  const dataInicio = String(req.query.data_inicio ?? '').trim();
+  const dataFim    = String(req.query.data_fim    ?? '').trim();
+  if (!dataInicio || !dataFim) {
+    res.status(400).json({ error: 'data_inicio and data_fim required' });
+    return;
+  }
+  try {
+    const upstream = await fetch(
+      `${CCM_BASE}/ocorrencias/?data_inicio=${dataInicio}&data_fim=${dataFim}`,
+      { headers: ccmHeaders(), signal: AbortSignal.timeout(15_000) },
+    );
+    if (upstream.status === 429) { res.status(429).json({ error: 'rate limited' }); return; }
+    if (!upstream.ok) { res.status(upstream.status).json({ error: 'upstream error' }); return; }
+    const data = await upstream.json();
+    res.json(data);
+  } catch (err) {
+    console.error('[proxy] /ocorrencias/ error:', err);
+    res.status(502).json({ error: 'upstream unavailable' });
+  }
 });
 
 app.get('/api/gtfs/stops', (req: Request, res: Response) => {
@@ -183,6 +227,55 @@ app.get('/api/gtfs/stops-near', (req: Request, res: Response) => {
 
   results.sort((a, b) => a.distance - b.distance);
   res.json({ stops: results.slice(0, 150) });
+});
+
+// ── Web Push routes ───────────────────────────────────────────────────────────
+
+const webPushSubscribeSchema = z.object({
+  endpoint: z.url(),
+  keys: z.object({
+    p256dh: z.string().min(1),
+    auth:   z.string().min(1),
+  }),
+  lines: z.array(z.string().min(1).max(20)).max(50),
+});
+
+app.post('/api/web-push/subscribe', requireApiKey, (req: Request, res: Response) => {
+  const parsed = webPushSubscribeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'invalid input' });
+    return;
+  }
+  const { endpoint, keys, lines } = parsed.data;
+
+  db.transaction((tx) => {
+    tx.insert(webPushSubscriptions)
+      .values({ endpoint, p256dh: keys.p256dh, auth: keys.auth, registeredAt: Date.now() })
+      .onConflictDoUpdate({ target: webPushSubscriptions.endpoint, set: { p256dh: keys.p256dh, auth: keys.auth, registeredAt: Date.now() } })
+      .run();
+    tx.delete(webPushLineSubscriptions).where(eq(webPushLineSubscriptions.endpoint, endpoint)).run();
+    for (const lineNum of lines) {
+      tx.insert(webPushLineSubscriptions).values({ endpoint, lineNum }).onConflictDoNothing().run();
+    }
+  });
+
+  console.log(`[web-push] subscribe endpoint=${endpoint.slice(0, 40)}... lines=${lines.join(',')}`);
+  res.json({ ok: true });
+});
+
+const webPushUnsubscribeSchema = z.object({
+  endpoint: z.url(),
+});
+
+app.post('/api/web-push/unsubscribe', requireApiKey, (req: Request, res: Response) => {
+  const parsed = webPushUnsubscribeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'invalid input' });
+    return;
+  }
+  db.delete(webPushSubscriptions).where(eq(webPushSubscriptions.endpoint, parsed.data.endpoint)).run();
+  console.log(`[web-push] unsubscribe endpoint=${parsed.data.endpoint.slice(0, 40)}...`);
+  res.json({ ok: true });
 });
 
 // ── Protected routes ──────────────────────────────────────────────────────────

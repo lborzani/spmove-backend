@@ -1,9 +1,10 @@
 import cron from 'node-cron';
 import { eq, lte } from 'drizzle-orm';
 import { db } from './db';
-import { prevStatus, lineSubscriptions, devices, reports } from './schema';
+import { prevStatus, lineSubscriptions, devices, reports, webPushSubscriptions, webPushLineSubscriptions } from './schema';
 import { fetchStatus, type StatusType, RateLimitError } from './spApi';
 import { sendPush } from './push';
+import { sendWebPush } from './webPush';
 
 const STATUS_LABELS: Record<StatusType, string> = {
   normal:  'Operação Normal',
@@ -47,6 +48,25 @@ async function checkStatus(): Promise<void> {
           `Linha ${line.num} · ${line.name}`,
           line.note || STATUS_LABELS[line.status],
         ).catch(err => console.error('[checker] sendPush error:', err));
+      }
+
+      const webSubscribers = db
+        .select({
+          endpoint: webPushSubscriptions.endpoint,
+          p256dh:   webPushSubscriptions.p256dh,
+          auth:     webPushSubscriptions.auth,
+        })
+        .from(webPushLineSubscriptions)
+        .innerJoin(webPushSubscriptions, eq(webPushSubscriptions.endpoint, webPushLineSubscriptions.endpoint))
+        .where(eq(webPushLineSubscriptions.lineNum, line.num))
+        .all();
+
+      if (webSubscribers.length > 0) {
+        sendWebPush(
+          webSubscribers,
+          `Linha ${line.num} · ${line.name}`,
+          line.note || STATUS_LABELS[line.status],
+        ).catch(err => console.error('[checker] sendWebPush error:', err));
       }
     }
 

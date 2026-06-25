@@ -40,3 +40,17 @@ export const prevStatus = sqliteTable('prev_status', {
   note:      text('note'),
   updatedAt: integer('updated_at').notNull(),
 });
+
+export const webPushSubscriptions = sqliteTable('web_push_subscriptions', {
+  endpoint:    text('endpoint').primaryKey(),
+  p256dh:      text('p256dh').notNull(),
+  auth:        text('auth').notNull(),
+  registeredAt: integer('registered_at').notNull(),
+});
+
+export const webPushLineSubscriptions = sqliteTable('web_push_line_subscriptions', {
+  endpoint: text('endpoint').notNull().references(() => webPushSubscriptions.endpoint, { onDelete: 'cascade' }),
+  lineNum:  text('line_num').notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.endpoint, t.lineNum] }),
+}));

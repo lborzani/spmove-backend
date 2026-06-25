@@ -3,10 +3,19 @@ const BASE = 'https://ccm.artesp.sp.gov.br/metroferroviario/api';
 export type StatusType = 'normal' | 'lento' | 'atencao' | 'parado';
 
 export interface LineStatus {
-  num:    string;
-  name:   string;
-  status: StatusType;
-  note:   string;
+  num:          string;
+  name:         string;
+  status:       StatusType;
+  note:         string;
+  atualizadoHa?: string;
+}
+
+let _cachedRaw: unknown = null;
+let _cachedAt  = 0;
+
+export function getCachedRaw(): { data: unknown; cachedAt: number } | null {
+  if (!_cachedRaw) return null;
+  return { data: _cachedRaw, cachedAt: _cachedAt };
 }
 
 const LINE_NAMES: Record<string, string> = {
@@ -55,6 +64,7 @@ interface ApiStatus {
         situacao:      string;
         classificacao: string;
         descricao:     string;
+        atualizado_ha: string;
       };
     }>;
   }>;
@@ -66,13 +76,17 @@ export class RateLimitError extends Error {
 
 export async function fetchStatus(): Promise<LineStatus[]> {
   const res = await fetch(`${BASE}/status/`, {
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', Authorization: `Api-Key ${process.env.CCM_API_KEY}` },
     signal: AbortSignal.timeout(10_000),
   });
   if (res.status === 429) throw new RateLimitError();
   if (!res.ok) throw new Error(`/status/ HTTP ${res.status}`);
 
   const data: ApiStatus = await res.json() as ApiStatus;
+
+  _cachedRaw = data;
+  _cachedAt  = Date.now();
+
   const lines: LineStatus[] = [];
 
   for (const empresa of data.empresas) {
@@ -81,10 +95,11 @@ export async function fetchStatus(): Promise<LineStatus[]> {
       if (!name) continue;
 
       lines.push({
-        num:    apiLine.codigo,
+        num:          apiLine.codigo,
         name,
-        status: mapSituacao(apiLine.status.situacao, apiLine.status.classificacao),
-        note:   apiLine.status.descricao || apiLine.status.situacao,
+        status:       mapSituacao(apiLine.status.situacao, apiLine.status.classificacao),
+        note:         apiLine.status.descricao || apiLine.status.situacao,
+        atualizadoHa: apiLine.status.atualizado_ha,
       });
     }
   }
