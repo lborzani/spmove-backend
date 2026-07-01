@@ -122,6 +122,9 @@ app.get('/api/metro/status/', (_req: Request, res: Response) => {
 const CCM_BASE    = 'https://ccm.artesp.sp.gov.br/metroferroviario/api';
 const ccmHeaders  = () => ({ Accept: 'application/json', Authorization: `Api-Key ${process.env.CCM_API_KEY}` });
 
+const OCORRENCIAS_TTL = 5 * 60 * 1000; // 5 min
+const ocorrenciasCache = new Map<string, { data: unknown; cachedAt: number }>();
+
 app.get('/api/metro/ocorrencias/', async (req: Request, res: Response) => {
   const dataInicio = String(req.query.data_inicio ?? '').trim();
   const dataFim    = String(req.query.data_fim    ?? '').trim();
@@ -129,17 +132,36 @@ app.get('/api/metro/ocorrencias/', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'data_inicio and data_fim required' });
     return;
   }
+
+  const cacheKey = `${dataInicio}_${dataFim}`;
+  const cached = ocorrenciasCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < OCORRENCIAS_TTL) {
+    res.json(cached.data);
+    return;
+  }
+
   try {
     const upstream = await fetch(
       `${CCM_BASE}/ocorrencias/?data_inicio=${dataInicio}&data_fim=${dataFim}`,
       { headers: ccmHeaders(), signal: AbortSignal.timeout(15_000) },
     );
-    if (upstream.status === 429) { res.status(429).json({ error: 'rate limited' }); return; }
-    if (!upstream.ok) { res.status(upstream.status).json({ error: 'upstream error' }); return; }
+    if (upstream.status === 429 || upstream.status === 403) {
+      const body = await upstream.text().catch(() => '(unreadable)');
+      console.warn(`[proxy] /ocorrencias/ rate limited (${upstream.status}):`, body);
+      if (cached) { res.json(cached.data); return; }
+      res.status(429).json({ error: 'rate limited' }); return;
+    }
+    if (!upstream.ok) {
+      const body = await upstream.text().catch(() => '(unreadable)');
+      console.error(`[proxy] /ocorrencias/ upstream ${upstream.status}:`, body);
+      res.status(upstream.status).json({ error: 'upstream error' }); return;
+    }
     const data = await upstream.json();
+    ocorrenciasCache.set(cacheKey, { data, cachedAt: Date.now() });
     res.json(data);
   } catch (err) {
     console.error('[proxy] /ocorrencias/ error:', err);
+    if (cached) { res.json(cached.data); return; }
     res.status(502).json({ error: 'upstream unavailable' });
   }
 });

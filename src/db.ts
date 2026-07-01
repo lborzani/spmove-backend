@@ -47,6 +47,17 @@ sqlite.exec(`
     note       TEXT,
     updated_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS web_push_subscriptions (
+    endpoint      TEXT    PRIMARY KEY,
+    p256dh        TEXT    NOT NULL,
+    auth          TEXT    NOT NULL,
+    registered_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS web_push_line_subscriptions (
+    endpoint TEXT NOT NULL REFERENCES web_push_subscriptions(endpoint) ON DELETE CASCADE,
+    line_num TEXT NOT NULL,
+    PRIMARY KEY (endpoint, line_num)
+  );
 `);
 
 // Safe migration for databases created before station column was added
